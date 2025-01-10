@@ -1084,6 +1084,23 @@ sr_shmsub_notify_evpipe(uint32_t evpipe_num)
     sr_error_info_t *err_info = NULL;
     char *path = NULL, buf[1] = {0};
     int fd = -1, ret;
+    char queue_name[32];
+    mqd_t mq;
+    char *msg = "Notification";
+
+   snprintf(queue_name, sizeof(queue_name), "/sr_queue_%u", evpipe_num);
+       /* open the existing message queue */
+    mq = mq_open(queue_name, O_WRONLY | O_NONBLOCK);
+    if (mq == (mqd_t)-1) {
+        sr_errinfo_new(&err_info, SR_ERR_SYS, "Opening message queue \"%s\" for writing failed (%s).", queue_name, strerror(errno));
+        goto cleanup;
+    }
+
+    /* send a message to the queue */
+    if (mq_send(mq, msg, strlen(msg), 0) == -1) {
+        sr_errinfo_new(&err_info, SR_ERR_SYS, "Sending message to queue \"%s\" failed (%s).", queue_name, strerror(errno));
+        goto cleanup;
+    }
 
     /* get path to the pipe */
     if ((err_info = sr_path_evpipe(evpipe_num, &path))) {
@@ -1099,7 +1116,8 @@ sr_shmsub_notify_evpipe(uint32_t evpipe_num)
     /* write one arbitrary byte */
     do {
         ret = write(fd, buf, 1);
-    } while (!ret);
+    } while (!ret && errno==EINTR);
+
     if (ret == -1) {
         SR_ERRINFO_SYSERRNO(&err_info, "write");
         goto cleanup;
@@ -1108,6 +1126,9 @@ sr_shmsub_notify_evpipe(uint32_t evpipe_num)
     /* success */
 
 cleanup:
+    if (mq != (mqd_t)-1) {
+        mq_close(mq);
+    }
     if (fd > -1) {
         close(fd);
     }
@@ -4785,7 +4806,7 @@ sr_shmsub_listen_thread(void *arg)
 {
     sr_error_info_t *err_info = NULL;
     sr_subscription_ctx_t *subscr = (sr_subscription_ctx_t *)arg;
-    struct pollfd fds;
+    struct pollfd fds[2];
     struct timespec wake_up_in = {0};
     int ret, timeout_ms;
 
@@ -4820,14 +4841,27 @@ wait_for_event:
             timeout_ms += wake_up_in.tv_nsec / 1000000;
         } else {
             /* 10 s */
-            timeout_ms = 10 * 1000;
+            timeout_ms = 1 * 90000;
         }
 
-        fds.fd = subscr->evpipe;
-        fds.events = POLLIN;
+        fds[0].fd = subscr->evpipe;
+        fds[0].events = POLLIN ;
+        fds[1].fd = subscr->mq;
+        fds[1].events = POLLIN ;
 
         /* wait for a new event */
-        ret = poll(&fds, 1, timeout_ms);
+        ret = poll(fds, 2, timeout_ms);
+        if(fds[1].revents == POLLIN){
+            if(fds[0].revents != POLLIN){
+                sr_log(SR_LL_ERR, "mq signalled but fifo is not, missed fifo event.");
+            }
+            char buffer[1024];
+            ssize_t bytes_read;
+            do {
+                bytes_read = mq_receive(subscr->mq, buffer, sizeof(buffer), NULL);
+            } while (bytes_read<0 && (errno == EINTR));
+        }
+
         if ((ret == -1) && (errno != EINTR)) {
             /* error */
             SR_ERRINFO_SYSERRNO(&err_info, "poll");
