@@ -1084,6 +1084,23 @@ sr_shmsub_notify_evpipe(uint32_t evpipe_num)
     sr_error_info_t *err_info = NULL;
     char *path = NULL, buf[1] = {0};
     int fd = -1, ret;
+    char queue_name[32];
+    mqd_t mq;
+    char *msg = "Notification";
+
+   snprintf(queue_name, sizeof(queue_name), "/sr_queue_%u", evpipe_num);
+       /* open the existing message queue */
+    mq = mq_open(queue_name, O_WRONLY | O_NONBLOCK);
+    if (mq == (mqd_t)-1) {
+        sr_errinfo_new(&err_info, SR_ERR_SYS, "Opening message queue \"%s\" for writing failed (%s).", queue_name, strerror(errno));
+        goto cleanup;
+    }
+
+    /* send a message to the queue */
+    if (mq_send(mq, msg, strlen(msg), 0) == -1) {
+        sr_errinfo_new(&err_info, SR_ERR_SYS, "Sending message to queue \"%s\" failed (%s).", queue_name, strerror(errno));
+        goto cleanup;
+    }
 
     /* get path to the pipe */
     if ((err_info = sr_path_evpipe(evpipe_num, &path))) {
@@ -1099,7 +1116,7 @@ sr_shmsub_notify_evpipe(uint32_t evpipe_num)
     /* write one arbitrary byte */
     do {
         ret = write(fd, buf, 1);
-    } while (!ret);
+    } while (!ret && errno==EINTR);
     if (ret == -1) {
         SR_ERRINFO_SYSERRNO(&err_info, "write");
         goto cleanup;
@@ -1108,6 +1125,9 @@ sr_shmsub_notify_evpipe(uint32_t evpipe_num)
     /* success */
 
 cleanup:
+    if (mq == (mqd_t)-1) {
+        mq_close(mq);
+    }
     if (fd > -1) {
         close(fd);
     }
@@ -1162,11 +1182,11 @@ sr_shmsub_change_notify_evpipe(struct sr_mod_info_s *mod_info, struct sr_mod_inf
             if ((err_info = sr_shmsub_notify_evpipe(shm_sub[i].evpipe_num))) {
                 /* If this CID is dead and ignore the error */
                 if (sr_conn_is_alive(shm_sub[i].cid)) {
-                    goto cleanup;
+                goto cleanup;
                 } else {
                     sr_errinfo_free(&err_info);
                     continue;
-                }
+            }
             }
             (*sub_count)++;
         }
@@ -1441,7 +1461,7 @@ cleanup:
     free(aux);
     free(full_diff_lyb);
     if (free_diff) {
-        free(diff_lyb);
+    free(diff_lyb);
     }
     sr_shm_clear(&shm_sub);
     sr_shm_clear(&shm_data_sub);
@@ -1751,7 +1771,7 @@ cleanup:
     free(aux);
     free(full_diff_lyb);
     if (free_diff) {
-        free(diff_lyb);
+    free(diff_lyb);
     }
     free(notify_subs);
     return err_info;
@@ -1932,7 +1952,7 @@ cleanup:
     free(aux);
     free(full_diff_lyb);
     if (free_diff) {
-        free(diff_lyb);
+    free(diff_lyb);
     }
     free(notify_subs);
     return err_info;
@@ -2059,8 +2079,8 @@ sr_shmsub_change_notify_change_abort(struct sr_mod_info_s *mod_info, const char 
                 /* current priority change event failed so no lower priority events could have been generated */
                 last_priority = 1;
                 if (subscriber_count) {
-                    /* do not notify subscribers that did not process the previous event */
-                    subscriber_count -= nsub->err_subscriber_count;
+                /* do not notify subscribers that did not process the previous event */
+                subscriber_count -= nsub->err_subscriber_count;
                 }
             }
             if (!subscriber_count) {
@@ -2174,7 +2194,7 @@ cleanup:
     free(aux);
     free(full_diff_lyb);
     if (free_diff) {
-        free(diff_lyb);
+    free(diff_lyb);
     }
     free(notify_subs);
     lyd_free_siblings(abort_diff);
@@ -4708,8 +4728,8 @@ sr_shmsub_notif_listen_process_module_events(struct modsub_notif_s *notif_subs, 
         /* check NACM */
         free(denied.rule_name);
         memset(&denied, 0, sizeof denied);
-        if (sub->sess->nacm_user && (err_info = sr_nacm_check_operation(sub->sess->nacm_user, notif, &denied))) {
-            goto cleanup;
+            if (sub->sess->nacm_user && (err_info = sr_nacm_check_operation(sub->sess->nacm_user, notif, &denied))) {
+                goto cleanup;
         }
 
         /* find the notification */
@@ -4889,7 +4909,7 @@ sr_shmsub_listen_thread(void *arg)
 {
     sr_error_info_t *err_info = NULL;
     sr_subscription_ctx_t *subscr = (sr_subscription_ctx_t *)arg;
-    struct pollfd fds;
+    struct pollfd fds[2];
     struct timespec wake_up_in = {0};
     int ret, timeout_ms;
 
@@ -4929,11 +4949,21 @@ wait_for_event:
             timeout_ms = 10 * 1000;
         }
 
-        fds.fd = subscr->evpipe;
-        fds.events = POLLIN;
+        fds[0].fd = subscr->evpipe;
+        fds[0].events = POLLIN ;
+        fds[1].fd = subscr->mq;
+        fds[1].events = POLLIN ;
 
         /* wait for a new event */
-        ret = poll(&fds, 1, timeout_ms);
+        ret = poll(fds, 2, timeout_ms);
+        if(fds[1].revents == POLLIN){
+            char buffer[1024];
+            ssize_t bytes_read;
+            do {
+                bytes_read = mq_receive(subscr->mq, buffer, sizeof(buffer), NULL);
+            } while (bytes_read<0 && (errno == EINTR));
+        }
+
         if ((ret == -1) && (errno != EINTR)) {
             /* error */
             SR_ERRINFO_SYSERRNO(&err_info, "poll");

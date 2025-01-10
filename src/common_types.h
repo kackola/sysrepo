@@ -22,6 +22,7 @@
 
 #include <pthread.h>
 #include <time.h>
+#include <mqueue.h>
 
 #include <libyang/libyang.h>
 
@@ -222,6 +223,7 @@ struct sr_subscription_ctx_s {
     sr_conn_ctx_t *conn;            /**< Connection of the subscription. */
     uint32_t evpipe_num;            /**< Event pipe number of this subscription structure. */
     int evpipe;                     /**< Event pipe opened for reading. */
+    mqd_t mq;
     ATOMIC_T thread_running;        /**< Flag whether the thread handling this subscription is running. */
     pthread_t tid;                  /**< Thread ID of the handler thread. */
     sr_rwlock_t subs_lock;          /**< Session-shared lock for accessing the subscriptions. */

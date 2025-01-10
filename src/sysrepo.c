@@ -1110,7 +1110,7 @@ sr_get_repo_path(void)
         if (strlen(SR_REPO_PATH) >= SR_PATH_MAX) {
             SR_LOG_WRN("Repository path \"%s\" cannot be used, longer than %u characters.", value, SR_PATH_MAX);
             value = NULL;
-        }
+    }
     }
 
     /* hard default */
@@ -3754,8 +3754,8 @@ sr_edit_batch(sr_session_ctx_t *session, const struct lyd_node *edit, const char
         /* check operations and set the default operation if none set */
         if (!(op = sr_edit_diff_find_oper(root, 0, NULL))) {
             if ((err_info = sr_edit_set_oper(root, default_operation))) {
-                goto cleanup_unlock;
-            }
+            goto cleanup_unlock;
+        }
         } else if ((session->ds == SR_DS_OPERATIONAL) && (op != def_op)) {
             sr_errinfo_new(&err_info, SR_ERR_UNSUPPORTED, "Mixed operations for operational datastore changes.");
             goto cleanup_unlock;
@@ -4328,8 +4328,8 @@ sr_discard_changes_xpath(sr_session_ctx_t *session, const char *xpath)
 
     if (!xpath) {
         /* discard all the changes */
-        sr_release_data(session->dt[session->ds].edit);
-        session->dt[session->ds].edit = NULL;
+    sr_release_data(session->dt[session->ds].edit);
+    session->dt[session->ds].edit = NULL;
         goto cleanup;
     }
 
@@ -5519,6 +5519,13 @@ _sr_unsubscribe(sr_subscription_ctx_t *subscription)
         }
     }
 
+    if(subscription->mq != (mqd_t)-1){
+        char queue_name[32];
+        mq_close(subscription->mq);
+        snprintf(queue_name, sizeof(queue_name), "/sr_queue_%u", subscription->evpipe_num);
+        mq_unlink(queue_name);
+    }
+
     /* unlink event pipe */
     if ((tmp_err = sr_path_evpipe(subscription->evpipe_num, &path))) {
         /* continue */
@@ -5717,6 +5724,8 @@ sr_subscr_new(sr_conn_ctx_t *conn, sr_subscr_options_t opts, sr_subscription_ctx
     sr_error_info_t *err_info = NULL;
     char *path = NULL;
     int ret;
+    struct mq_attr attr;
+    char queue_name[32];
 
     assert(!*subs_p);
 
@@ -5734,6 +5743,18 @@ sr_subscr_new(sr_conn_ctx_t *conn, sr_subscr_options_t opts, sr_subscription_ctx
 
     /* get event pipe name */
     if ((err_info = sr_path_evpipe((*subs_p)->evpipe_num, &path))) {
+        goto error;
+    }
+
+        /* create a unique queue name based on evpipe_num */
+    snprintf(queue_name, sizeof(queue_name), "/sr_queue_%u", (*subs_p)->evpipe_num);
+
+    attr.mq_flags = 0;
+    attr.mq_maxmsg = 10;
+    attr.mq_msgsize = 1024;
+    attr.mq_curmsgs = 0;
+    (*subs_p)->mq = mq_open(queue_name, O_CREAT | O_RDONLY, 0644, &attr);
+    if ((*subs_p)->mq == (mqd_t)-1) {
         goto error;
     }
 
@@ -5770,6 +5791,9 @@ sr_subscr_new(sr_conn_ctx_t *conn, sr_subscr_options_t opts, sr_subscription_ctx
     return NULL;
 
 error:
+    if ((*subs_p)->mq != (mqd_t)-1) {
+        mq_close((*subs_p)->mq);
+    }
     free(path);
     if ((*subs_p)->evpipe > -1) {
         close((*subs_p)->evpipe);
